@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import requests
+import pytz # Added for IST
 from datetime import datetime, time as dt_time
 
 # ============= [TELEGRAM CONFIG] =============
@@ -15,12 +16,12 @@ if 'sent_alerts' not in st.session_state:
     st.session_state.sent_alerts = set()
 
 def send_telegram_msg(message, alert_key):
-    # Check if this alert was already sent in this session
+    # REFINED SPAM PROTECTION
     if alert_key not in st.session_state.sent_alerts:
         try:
             url = f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={message}&parse_mode=HTML&disable_web_page_preview=true"
-            requests.get(url)
-            st.session_state.sent_alerts.add(alert_key) # Save to memory
+            requests.get(url, timeout=5)
+            st.session_state.sent_alerts.add(alert_key)
         except: pass
 
 # ============= [1] UI & PROFESSIONAL CSS (STRICT HIDE ENABLED) =============
@@ -28,9 +29,9 @@ st.set_page_config(page_title="HEYFUND", layout="wide")
 
 st.markdown("""
     <style>
-    .stApp { background-color: #2E2D2D; color: #e0e0e0; }
+    .stApp { background-color: #2E2D2D; color: #e0e0e0; opacity: 1 !important; visibility: visible !important; }
     
-    /* 🔴 STRICT HIDE */
+    /* 🔴 STRICT HIDE & FOG FIX */
     div[data-testid="stStatusWidget"], [data-testid="stStatusWidget"], .stStatusWidget,
     div[class*="stStatusWidget"], div[data-testid="stSpinner"],
     header[data-testid="stHeader"] .st-emotion-cache-p5m613, .st-emotion-cache-p5m613 {
@@ -129,7 +130,8 @@ def get_detailed_news(ticker):
         news = stock.news
         if not news: return None
         latest = news[0]
-        dt = datetime.fromtimestamp(latest['providerPublishTime'])
+        # IST Fix for news
+        dt = datetime.fromtimestamp(latest['providerPublishTime'], tz=pytz.timezone('Asia/Kolkata'))
         time_str = dt.strftime("%d %b, %H:%M")
         title = latest['title'].lower()
         pos_words = ["profit", "up", "buy", "surge", "growth", "high", "gain", "order", "positive"]
@@ -160,7 +162,9 @@ def get_advanced_market_data():
             idx_res.append({'name': name, 'val': f"{cp:,.2f}", 'pts': round(cp-pcp, 2), 'pct': round(((cp-pcp)/pcp)*100, 2)})
 
         stock_res = []
-        current_date = datetime.now().strftime("%Y%m%d")
+        # Alert Date Key logic
+        tz_ind = pytz.timezone('Asia/Kolkata')
+        current_date = datetime.now(tz_ind).strftime("%Y%m%d")
         
         for s in stocks:
             t = s + ".NS"
@@ -170,13 +174,13 @@ def get_advanced_market_data():
                 cp, pcp = t_df['Close'].iloc[-1], t_df['Close'].iloc[-2]
                 hi, lo = t_df['High'].iloc[-2], t_df['Low'].iloc[-2]
                 w_high = t_df['High'].iloc[-6:-1].max()
-                v_ratio = round(t_df['Volume'].iloc[-1] / (t_df['Volume'].iloc[-6:-1].mean()), 2)
+                v_ratio = round(t_df['Volume'].iloc[-1] / (t_df['Volume'].iloc[-6:-1].mean() + 1e-9), 2)
                 
                 w_trends = get_supertrend_list(t_df.resample('W').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last'}).dropna(), 9, 2)
                 buy_switch = w_trends[-1] == True and w_trends[-2] == False
                 sell_switch = w_trends[-1] == False and w_trends[-2] == True
 
-                # ============= [TELEGRAM ALERTS WITH CHART LINK] =============
+                # ============= [TELEGRAM ALERTS] =============
                 tv_link = f"https://www.tradingview.com/chart/?symbol=NSE:{s}"
                 details = f"\nPrice: ₹{round(cp,2)}\nVol: x{v_ratio} | RSI: {rsi_val}\n<a href='{tv_link}'>📈 Open Chart</a>"
                 
@@ -187,7 +191,7 @@ def get_advanced_market_data():
                     send_telegram_msg(f"🩸 <b> SELL</b>: {s} @ ₹{round(cp,2)} 🔴{details}", f"{s}_{current_date}_sell")
                 
                 if cp > hi and cp > w_high and v_ratio >= 2.0:
-                    send_telegram_msg(f"🚀 <b>BREAKOUT BUY</b>: {s} @ ₹{round(cp,2)} 🟢\n(PDH + WB Match){details}", f"{s}_{current_date}_break")
+                    send_telegram_msg(f"🚀 <b>BREAKOUT BUY</b>: {s} @ ₹{round(cp,2)} 🟢{details}", f"{s}_{current_date}_break")
 
                 tags_html = f'<div class="tag-container">'
                 tags_html += f'<span class="tag-box tag-pdh">PDH</span>' if cp > hi else (f'<span class="tag-box tag-pdl">PDL</span>' if cp < lo else '<span class="tag-box tag-zone">ZONE</span>')
@@ -205,13 +209,19 @@ with h1: st.title("🛡️ HEYFUND")
 with h2:
     @st.fragment(run_every=1)
     def show_clock_live():
-        now = datetime.now()
+        # IST Fix
+        tz = pytz.timezone('Asia/Kolkata')
+        now = datetime.now(tz)
         is_open = now.weekday() < 5 and (dt_time(9,15) <= now.time() <= dt_time(15,30))
         st.markdown(f'<div class="market-status-bar"><div class="status-dot {"dot-green" if is_open else "dot-red"}"></div><div class="{"status-badge" if is_open else "status-badge-closed"}">{"LIVE" if is_open else "CLOSED"}</div><div class="market-time">{now.strftime("%H:%M:%S")}</div></div>', unsafe_allow_html=True)
     show_clock_live()
 
 @st.fragment(run_every=60)
 def show_dashboard_silent():
+    # Anti-Sleep logic
+    try: requests.get("https://google.com", timeout=1)
+    except: pass
+
     indices, df = get_advanced_market_data()
     if indices:
         idx_cols = st.columns(4)
@@ -286,8 +296,8 @@ def show_dashboard_silent():
     with tab_scan:
         if not df.empty:
             s1, s2, s3, s4 = st.columns(4)
-            draw_list_format("🏆  BUY", df[df['BuySwitch'] == True], s1)
-            draw_list_format("🩸  SELL", df[df['SellSwitch'] == True], s2)
+            draw_list_format("🏆 BUY", df[df['BuySwitch'] == True], s1)
+            draw_list_format("🩸 SELL", df[df['SellSwitch'] == True], s2)
             draw_list_format("💪 STRONG BUY", df[(df['WeeklyGreen'] == True) & (df['RSI'] > 60)], s3)
             draw_list_format("🚀 BREAKOUT", df[df['VolRatio'] >= 1.8].sort_values('VolRatio', ascending=False), s4)
 
